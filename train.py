@@ -34,7 +34,7 @@ class LatestCheckpointCallback(BaseCallback):
         return True
 
 
-def build_level0_config() -> GameConfig:
+def build_level0_config(spawn_jitter: float = 0.0, min_spawn_distance: float = 6.0) -> GameConfig:
     # Easiest curriculum level.
     cfg = GameConfig()
     cfg.enable_phases = False
@@ -42,6 +42,8 @@ def build_level0_config() -> GameConfig:
     cfg.enable_leap = False
     cfg.fan_count = 5
     cfg.boss_speed = 0.20
+    cfg.spawn_jitter = max(0.0, float(spawn_jitter))
+    cfg.min_spawn_distance = max(0.0, float(min_spawn_distance))
     return cfg
 
 
@@ -83,6 +85,24 @@ def parse_args():
     parser.add_argument("--num-envs", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="auto", help="auto, cpu, cuda, mps")
+    parser.add_argument(
+        "--train-spawn-jitter",
+        type=float,
+        default=0.0,
+        help="Random start jitter radius (world units) used during training resets.",
+    )
+    parser.add_argument(
+        "--eval-spawn-jitter",
+        type=float,
+        default=0.0,
+        help="Random start jitter radius (world units) used during eval callback resets.",
+    )
+    parser.add_argument(
+        "--min-spawn-distance",
+        type=float,
+        default=6.0,
+        help="Minimum initial distance between player and boss when spawn jitter is enabled.",
+    )
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--n-steps", type=int, default=1024, help="Rollout steps per env before update.")
     parser.add_argument("--batch-size", type=int, default=512)
@@ -138,17 +158,24 @@ def main():
     args.log_dir.mkdir(parents=True, exist_ok=True)
     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg = build_level0_config()
+    train_cfg = build_level0_config(
+        spawn_jitter=args.train_spawn_jitter,
+        min_spawn_distance=args.min_spawn_distance,
+    )
+    eval_cfg = build_level0_config(
+        spawn_jitter=args.eval_spawn_jitter,
+        min_spawn_distance=args.min_spawn_distance,
+    )
     train_env = create_train_env(
         num_envs=args.num_envs,
         seed=args.seed,
-        cfg=cfg,
+        cfg=train_cfg,
         normalize=args.normalize,
         start_method=args.start_method,
     )
     eval_env = create_eval_env(
         seed=args.seed + 10_000,
-        cfg=cfg,
+        cfg=eval_cfg,
         normalize=args.normalize,
     )
     sync_eval_vecnormalize(train_env, eval_env)
@@ -209,6 +236,9 @@ def main():
         "device": args.device,
         "normalize": args.normalize,
         "learning_rate": args.learning_rate,
+        "train_spawn_jitter": args.train_spawn_jitter,
+        "eval_spawn_jitter": args.eval_spawn_jitter,
+        "min_spawn_distance": args.min_spawn_distance,
         "n_steps": args.n_steps,
         "batch_size": args.batch_size,
         "n_epochs": args.n_epochs,

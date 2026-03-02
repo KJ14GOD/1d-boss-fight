@@ -261,6 +261,18 @@ python /Users/kj16/Desktop/game_rl/train.py \
   --device cpu
 ```
 
+Train with randomized starts (recommended for generalization):
+
+```bash
+python /Users/kj16/Desktop/game_rl/train.py \
+  --total-timesteps 500000 \
+  --num-envs 8 \
+  --normalize \
+  --train-spawn-jitter 1.5 \
+  --eval-spawn-jitter 0.0 \
+  --device cpu
+```
+
 Evaluate best checkpoint (50 episodes):
 
 ```bash
