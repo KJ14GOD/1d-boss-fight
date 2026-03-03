@@ -20,6 +20,7 @@ class GameConfig:
 
     #player
     player_hp: float = 100.0
+    player_radius: float = 0.35
     player_speed: float = 0.34
     player_shoot_cd: int = 12
     player_projectile_speed: float = 0.62
@@ -28,6 +29,7 @@ class GameConfig:
 
     #boss
     boss_hp: float = 220.0
+    boss_radius: float = 0.52
     boss_speed: float = 0.20
     boss_shoot_cd: int = 8
     boss_projectile_speed: float = 0.78
@@ -212,6 +214,19 @@ class BossArenaEnv(gym.Env):
         else:
             self.boss_vel[:] = 0.0
 
+        # Prevent the two circles from sitting inside each other.
+        sep = self.player_pos - self.boss_pos
+        dist2 = float(np.linalg.norm(sep))
+        min_dist = float(self.cfg.player_radius + self.cfg.boss_radius)
+        if dist2 < min_dist:
+            if dist2 <= 1e-6:
+                sep_dir = np.array([1.0, 0.0], dtype=np.float32)
+            else:
+                sep_dir = np.array(sep / dist2, dtype=np.float32)
+            self.boss_pos -= sep_dir * (min_dist - dist2)
+            self.boss_pos[0] = float(np.clip(self.boss_pos[0], 0.0, self.cfg.width))
+            self.boss_pos[1] = float(np.clip(self.boss_pos[1], 0.0, self.cfg.height))
+
         if self.boss_shoot_cd == 0:
             self.spawn_projectile(
                 origin=self.boss_pos,
@@ -249,9 +264,27 @@ class BossArenaEnv(gym.Env):
             )
         )
 
+    def _projectile_hits_target(self, proj: Projectile) -> bool:
+        if proj.owner == 1:
+            return float(np.linalg.norm(self.boss_pos - proj.pos)) <= (proj.radius + self.cfg.boss_radius)
+        return float(np.linalg.norm(self.player_pos - proj.pos)) <= (proj.radius + self.cfg.player_radius)
+
+    def _apply_projectile_hit(self, proj: Projectile) -> None:
+        if proj.owner == 1:
+            self.boss_hp -= proj.damage
+            self._damage_dealt_step += proj.damage
+        else:
+            self.player_hp -= proj.damage
+            self._damage_taken_step += proj.damage
+
     def update_projectiles(self) -> None:
         alive: List[Projectile] = []
         for proj in self.projectiles:
+            # Check current position first so overlap-at-spawn doesn't miss.
+            if self._projectile_hits_target(proj):
+                self._apply_projectile_hit(proj)
+                continue
+
             proj.pos = proj.pos + proj.vel
 
             if proj.pos[0] < -1.0 or proj.pos[0] > self.cfg.width + 1.0:
@@ -259,18 +292,9 @@ class BossArenaEnv(gym.Env):
             if proj.pos[1] < -1.0 or proj.pos[1] > self.cfg.height + 1.0:
                 continue
 
-            if proj.owner == 1:
-                # Player projectile hits boss.
-                if float(np.linalg.norm(self.boss_pos - proj.pos)) <= proj.radius:
-                    self.boss_hp -= proj.damage
-                    self._damage_dealt_step += proj.damage
-                    continue
-            else:
-                # Boss projectile hits player.
-                if float(np.linalg.norm(self.player_pos - proj.pos)) <= proj.radius:
-                    self.player_hp -= proj.damage
-                    self._damage_taken_step += proj.damage
-                    continue
+            if self._projectile_hits_target(proj):
+                self._apply_projectile_hit(proj)
+                continue
 
             alive.append(proj)
 
@@ -410,8 +434,8 @@ class BossArenaEnv(gym.Env):
 
         player_xy = self._world_to_screen(self.player_pos)
         boss_xy = self._world_to_screen(self.boss_pos)
-        player_r = max(4, int((0.35 / self.cfg.width) * self.cfg.render_width))
-        boss_r = max(6, int((0.52 / self.cfg.width) * self.cfg.render_width))
+        player_r = max(4, int((self.cfg.player_radius / self.cfg.width) * self.cfg.render_width))
+        boss_r = max(6, int((self.cfg.boss_radius / self.cfg.width) * self.cfg.render_width))
 
         pygame.draw.circle(surface, (80, 200, 255), player_xy, player_r)
         pygame.draw.circle(surface, (255, 90, 90), boss_xy, boss_r)
