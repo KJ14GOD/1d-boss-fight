@@ -37,11 +37,9 @@ class LatestCheckpointCallback(BaseCallback):
 def build_level0_config(spawn_jitter: float = 0.0, min_spawn_distance: float = 6.0) -> GameConfig:
     # Easiest curriculum level.
     cfg = GameConfig()
-    cfg.enable_phases = False
-    cfg.enable_ring = False
-    cfg.enable_leap = False
-    cfg.fan_count = 5
-    cfg.boss_speed = 0.20
+    cfg.boss_speed = 0.18
+    cfg.boss_shoot_cd = 20
+    cfg.player_shoot_cd = 9
     cfg.spawn_jitter = max(0.0, float(spawn_jitter))
     cfg.min_spawn_distance = max(0.0, float(min_spawn_distance))
     return cfg

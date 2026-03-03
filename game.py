@@ -1,61 +1,40 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import List, Optional
-
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
-
 try:
     import pygame
-except Exception:  # pragma: no cover - optional dependency
+except Exception: 
     pygame = None
 
 
 @dataclass
 class GameConfig:
-    # Arena + episode
     width: float = 20.0
-    height: float = 12.0
-    max_steps: int = 1200
+    height: float = 20.0
+    max_steps: int = 10000
     spawn_jitter: float = 0.0
     min_spawn_distance: float = 6.0
 
-    # Player
+    #player
     player_hp: float = 100.0
-    player_speed: float = 0.35
-    dash_speed: float = 1.1
-    dash_cd: int = 10
-    melee_range: float = 1.6
-    melee_damage: float = 8.0
-    melee_cd: int = 12
+    player_speed: float = 0.34
+    player_shoot_cd: int = 12
+    player_projectile_speed: float = 0.62
+    player_projectile_radius: float = 0.20
+    player_projectile_damage: float = 6.0
 
-    # Boss
-    boss_hp: float = 150.0
-    boss_speed: float = 0.24
-    swipe_range: float = 1.4
-    swipe_damage: float = 6.0
-    swipe_cd: int = 18
-    fan_count: int = 5
-    fan_cd: int = 28
-    fan_spread_rad: float = 0.9
-    fan_speed: float = 0.46
-    fan_life: int = 85
-    projectile_radius: float = 0.22
-    projectile_damage: float = 4.0
-    enable_ring: bool = False
-    ring_count: int = 12
-    ring_speed: float = 0.36
-    ring_life: int = 85
-    ring_cd: int = 55
-    enable_leap: bool = False
-    leap_cd: int = 75
-    leap_radius: float = 1.5
-    leap_damage: float = 9.0
-    enable_phases: bool = False
+    #boss
+    boss_hp: float = 220.0
+    boss_speed: float = 0.20
+    boss_shoot_cd: int = 8
+    boss_projectile_speed: float = 0.78
+    boss_projectile_radius: float = 0.26
+    boss_projectile_damage: float = 9.0
 
-    # Reward (taken penalty stronger to discourage reckless trading)
+    #reward
     r_damage_dealt: float = 0.08
     r_damage_taken: float = -0.12
     r_time: float = -0.002
@@ -63,11 +42,11 @@ class GameConfig:
     r_loss: float = -20.0
     r_draw: float = -2.0
 
-    # Observation
-    k_projectiles: int = 4  # nearest K in obs
+    #observation
+    k_projectiles: int = 4
     obs_dim: int = 53
 
-    # Rendering
+    #rendering
     render_width: int = 960
     render_height: int = 576
     render_fps: int = 60
@@ -75,17 +54,17 @@ class GameConfig:
 
 @dataclass
 class Projectile:
-    pos: np.ndarray  # (2,)
-    vel: np.ndarray  # (2,)
-    life: int
-    radius: float
-    damage: float
+    pos: np.ndarray  #(x,y)
+    vel: np.ndarray  #(vx,vy)
+    radius: float #radius of the projectile
+    damage: float #damage dealt by the projectile
+    owner: int  # 1=player projectile, -1=boss projectile
 
 
 class BossArenaEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
 
-    _MOVE_DIRS = np.array(
+    move_dirs = np.array(
         [
             [0.0, 0.0],  # idle
             [0.0, -1.0],  # up
@@ -101,16 +80,19 @@ class BossArenaEnv(gym.Env):
     )
 
     def __init__(self, cfg: Optional[GameConfig] = None, render_mode: Optional[str] = None):
-        super().__init__()
         self.cfg = cfg or GameConfig()
-
         if render_mode not in (None, "human", "rgb_array"):
             raise ValueError(f"Unsupported render_mode: {render_mode}")
+
         self.render_mode = render_mode
 
-        self.action_space = spaces.MultiDiscrete([9, 2, 2])
+        # move directions + shoot
+        self.action_space = spaces.MultiDiscrete([9, 2])
         self.observation_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(self.cfg.obs_dim,), dtype=np.float32
+            low=-1.0,
+            high=1.0,
+            shape=(self.cfg.obs_dim,),
+            dtype=np.float32,
         )
 
         self._screen = None
@@ -121,23 +103,18 @@ class BossArenaEnv(gym.Env):
 
     def _init_state(self) -> None:
         self.step_count = 0
+
         self.player_pos = np.zeros(2, dtype=np.float32)
         self.player_vel = np.zeros(2, dtype=np.float32)
         self.player_hp = self.cfg.player_hp
-        self.player_dash_cd = 0
-        self.player_melee_cd = 0
+        self.player_shoot_cd = 0
 
         self.boss_pos = np.zeros(2, dtype=np.float32)
         self.boss_vel = np.zeros(2, dtype=np.float32)
         self.boss_hp = self.cfg.boss_hp
-        self.boss_phase = 1
-        self.boss_swipe_cd = 0
-        self.boss_fan_cd = 0
-        self.boss_ring_cd = 0
-        self.boss_leap_cd = 0
+        self.boss_shoot_cd = 0
 
         self.projectiles: List[Projectile] = []
-
         self._damage_dealt_step = 0.0
         self._damage_taken_step = 0.0
 
@@ -145,7 +122,6 @@ class BossArenaEnv(gym.Env):
         super().reset(seed=seed)
         self._init_state()
 
-        # deterministic starts
         base_player = np.array([self.cfg.width * 0.25, self.cfg.height * 0.5], dtype=np.float32)
         base_boss = np.array([self.cfg.width * 0.75, self.cfg.height * 0.5], dtype=np.float32)
         self.player_pos[:] = base_player
@@ -153,21 +129,20 @@ class BossArenaEnv(gym.Env):
 
         jitter = float(max(0.0, self.cfg.spawn_jitter))
         if jitter > 0.0:
-            # Randomized starts for generalization testing.
             for _ in range(24):
-                p = base_player + self.np_random.uniform(-jitter, jitter, size=2).astype(np.float32)
-                b = base_boss + self.np_random.uniform(-jitter, jitter, size=2).astype(np.float32)
-                p[0] = float(np.clip(p[0], 0.0, self.cfg.width))
-                p[1] = float(np.clip(p[1], 0.0, self.cfg.height))
-                b[0] = float(np.clip(b[0], 0.0, self.cfg.width))
-                b[1] = float(np.clip(b[1], 0.0, self.cfg.height))
+                p = base_player + self.np_random.uniform(-jitter, jitter, size=2).astype(np.float32) # add randomness to player pos
+                b = base_boss + self.np_random.uniform(-jitter, jitter, size=2).astype(np.float32) # add randomness to boss pos
+                p[0] = float(np.clip(p[0], 0.0, self.cfg.width))  # clip to arena width
+                p[1] = float(np.clip(p[1], 0.0, self.cfg.height))  # clip to arena height
+                b[0] = float(np.clip(b[0], 0.0, self.cfg.width))  # clip to arena width
+                b[1] = float(np.clip(b[1], 0.0, self.cfg.height))  # clip to arena height
                 if float(np.linalg.norm(b - p)) >= self.cfg.min_spawn_distance:
                     self.player_pos[:] = p
                     self.boss_pos[:] = b
                     break
 
-        obs = self._get_obs()
-        info = {"phase": self.boss_phase}
+        obs = self.get_obs()
+        info = {"projectiles": 0}
         return obs, info
 
     def step(self, action):
@@ -175,71 +150,57 @@ class BossArenaEnv(gym.Env):
         self._damage_dealt_step = 0.0
         self._damage_taken_step = 0.0
 
-        self._apply_player_action(action)
-        self._update_boss_ai()
-        self._damage_taken_step += self._update_projectiles()
+        self.apply_player_action(action)
+        self.update_boss_ai()
+        self.update_projectiles()
 
         self.player_hp = float(max(0.0, self.player_hp))
         self.boss_hp = float(max(0.0, self.boss_hp))
 
         terminated = (self.player_hp <= 0.0) or (self.boss_hp <= 0.0)
         truncated = self.step_count >= self.cfg.max_steps
-        reward = self._compute_reward(terminated, truncated)
+        
+        reward = self.compute_reward(terminated, truncated)
 
-        obs = self._get_obs()
+        obs = self.get_obs()
         info = {
             "win": self.boss_hp <= 0.0 and self.player_hp > 0.0,
             "boss_hp": float(self.boss_hp),
             "player_hp": float(self.player_hp),
             "damage_dealt_step": float(self._damage_dealt_step),
             "damage_taken_step": float(self._damage_taken_step),
-            "phase": int(self.boss_phase),
             "projectiles": int(len(self.projectiles)),
         }
         return obs, reward, terminated, truncated, info
 
-    def _apply_player_action(self, action) -> None:
+    def apply_player_action(self, action) -> None:
         move_idx = int(action[0])
-        dash = int(action[1]) == 1
-        melee = int(action[2]) == 1
-
-        self.player_dash_cd = max(0, self.player_dash_cd - 1)
-        self.player_melee_cd = max(0, self.player_melee_cd - 1)
-
-        speed = self.cfg.player_speed
-        if dash and self.player_dash_cd == 0:
-            speed = self.cfg.dash_speed
-            self.player_dash_cd = self.cfg.dash_cd
-
-        direction = self._MOVE_DIRS[move_idx]
-        self.player_vel = direction * speed
-        self.player_pos += self.player_vel
-        self.player_pos[0] = float(np.clip(self.player_pos[0], 0.0, self.cfg.width))
-        self.player_pos[1] = float(np.clip(self.player_pos[1], 0.0, self.cfg.height))
-
-        if melee and self.player_melee_cd == 0:
-            dist = float(np.linalg.norm(self.boss_pos - self.player_pos))
-            if dist <= self.cfg.melee_range:
-                self.boss_hp -= self.cfg.melee_damage
-                self._damage_dealt_step += self.cfg.melee_damage
-            self.player_melee_cd = self.cfg.melee_cd
-
-    def _update_boss_ai(self) -> None:
-        self.boss_swipe_cd = max(0, self.boss_swipe_cd - 1)
-        self.boss_fan_cd = max(0, self.boss_fan_cd - 1)
-        self.boss_ring_cd = max(0, self.boss_ring_cd - 1)
-        self.boss_leap_cd = max(0, self.boss_leap_cd - 1)
-
-        if self.cfg.enable_phases:
-            hp_ratio = self.boss_hp / max(1e-6, self.cfg.boss_hp)
-            if hp_ratio <= 0.33:
-                self.boss_phase = 3
-            elif hp_ratio <= 0.66:
-                self.boss_phase = 2
-            else:
-                self.boss_phase = 1
+        if int(action[1]) == 1:
+            shoot = True
         else:
-            self.boss_phase = 1
+            shoot = False
+
+        self.player_shoot_cd = max(0, self.player_shoot_cd - 1)
+
+        direction = self.move_dirs[move_idx]
+        self.player_vel = direction * self.cfg.player_speed
+        self.player_pos += self.player_vel
+        self.player_pos[0] = float(np.clip(self.player_pos[0], 0.0, self.cfg.width)) #clip to arena width
+        self.player_pos[1] = float(np.clip(self.player_pos[1], 0.0, self.cfg.height)) #clip to arena height
+ 
+        if shoot and self.player_shoot_cd == 0:
+            self.spawn_projectile(
+                origin=self.player_pos,
+                target=self.boss_pos,
+                speed=self.cfg.player_projectile_speed,
+                radius=self.cfg.player_projectile_radius,
+                damage=self.cfg.player_projectile_damage,
+                owner=1,
+            )
+            self.player_shoot_cd = self.cfg.player_shoot_cd
+
+    def update_boss_ai(self) -> None:
+        self.boss_shoot_cd = max(0, self.boss_shoot_cd - 1)
 
         delta = self.player_pos - self.boss_pos
         dist = float(np.linalg.norm(delta))
@@ -251,108 +212,71 @@ class BossArenaEnv(gym.Env):
         else:
             self.boss_vel[:] = 0.0
 
-        if dist <= self.cfg.swipe_range and self.boss_swipe_cd == 0:
-            self.player_hp -= self.cfg.swipe_damage
-            self._damage_taken_step += self.cfg.swipe_damage
-            self.boss_swipe_cd = self.cfg.swipe_cd
+        if self.boss_shoot_cd == 0:
+            self.spawn_projectile(
+                origin=self.boss_pos,
+                target=self.player_pos,
+                speed=self.cfg.boss_projectile_speed,
+                radius=self.cfg.boss_projectile_radius,
+                damage=self.cfg.boss_projectile_damage,
+                owner=-1,
+            )
+            self.boss_shoot_cd = self.cfg.boss_shoot_cd
 
-        if self.boss_fan_cd == 0:
-            self._spawn_fan_projectiles()
-            self.boss_fan_cd = self.cfg.fan_cd
-
-        if self.cfg.enable_ring and self.boss_phase >= 2 and self.boss_ring_cd == 0:
-            self._spawn_ring_projectiles()
-            self.boss_ring_cd = self.cfg.ring_cd
-
-        if self.cfg.enable_leap and self.boss_phase >= 3 and self.boss_leap_cd == 0:
-            self._do_leap_slam()
-            self.boss_leap_cd = self.cfg.leap_cd
-
-    def _spawn_fan_projectiles(self) -> None:
-        delta = self.player_pos - self.boss_pos
-        base = float(np.arctan2(delta[1], delta[0]))
-        n = max(1, int(self.cfg.fan_count))
-        if n == 1:
-            angles = [base]
+    def spawn_projectile(
+        self,
+        origin: np.ndarray,
+        target: np.ndarray,
+        speed: float,
+        radius: float,
+        damage: float,
+        owner: int,
+    ) -> None:
+        delta = target - origin
+        norm = float(np.linalg.norm(delta))
+        if norm <= 1e-6:
+            direction = np.array([1.0, 0.0], dtype=np.float32)
         else:
-            angles = np.linspace(
-                base - self.cfg.fan_spread_rad / 2.0,
-                base + self.cfg.fan_spread_rad / 2.0,
-                n,
+            direction = np.array(delta / norm, dtype=np.float32)
+        vel = direction * float(speed)
+        self.projectiles.append(
+            Projectile(
+                pos=origin.copy(),
+                vel=vel.astype(np.float32),
+                radius=float(radius),
+                damage=float(damage),
+                owner=int(owner),
             )
+        )
 
-        for angle in angles:
-            vel = np.array(
-                [np.cos(angle) * self.cfg.fan_speed, np.sin(angle) * self.cfg.fan_speed],
-                dtype=np.float32,
-            )
-            self.projectiles.append(
-                Projectile(
-                    pos=self.boss_pos.copy(),
-                    vel=vel,
-                    life=int(self.cfg.fan_life),
-                    radius=float(self.cfg.projectile_radius),
-                    damage=float(self.cfg.projectile_damage),
-                )
-            )
-
-    def _spawn_ring_projectiles(self) -> None:
-        n = max(1, int(self.cfg.ring_count))
-        angles = np.linspace(0.0, 2.0 * np.pi, n, endpoint=False)
-        for angle in angles:
-            vel = np.array(
-                [np.cos(angle) * self.cfg.ring_speed, np.sin(angle) * self.cfg.ring_speed],
-                dtype=np.float32,
-            )
-            self.projectiles.append(
-                Projectile(
-                    pos=self.boss_pos.copy(),
-                    vel=vel,
-                    life=int(self.cfg.ring_life),
-                    radius=float(self.cfg.projectile_radius),
-                    damage=float(self.cfg.projectile_damage),
-                )
-            )
-
-    def _do_leap_slam(self) -> None:
-        offset = np.array(self.np_random.uniform(-0.7, 0.7, size=2), dtype=np.float32)
-        target = self.player_pos + offset
-        target[0] = float(np.clip(target[0], 0.0, self.cfg.width))
-        target[1] = float(np.clip(target[1], 0.0, self.cfg.height))
-        self.boss_pos[:] = target
-
-        dist = float(np.linalg.norm(self.player_pos - self.boss_pos))
-        if dist <= self.cfg.leap_radius:
-            self.player_hp -= self.cfg.leap_damage
-            self._damage_taken_step += self.cfg.leap_damage
-
-    def _update_projectiles(self) -> float:
-        damage_taken = 0.0
+    def update_projectiles(self) -> None:
         alive: List[Projectile] = []
-
         for proj in self.projectiles:
             proj.pos = proj.pos + proj.vel
-            proj.life -= 1
 
-            if proj.life <= 0:
-                continue
             if proj.pos[0] < -1.0 or proj.pos[0] > self.cfg.width + 1.0:
                 continue
             if proj.pos[1] < -1.0 or proj.pos[1] > self.cfg.height + 1.0:
                 continue
 
-            dist = float(np.linalg.norm(self.player_pos - proj.pos))
-            if dist <= proj.radius:
-                self.player_hp -= proj.damage
-                damage_taken += proj.damage
-                continue
+            if proj.owner == 1:
+                # Player projectile hits boss.
+                if float(np.linalg.norm(self.boss_pos - proj.pos)) <= proj.radius:
+                    self.boss_hp -= proj.damage
+                    self._damage_dealt_step += proj.damage
+                    continue
+            else:
+                # Boss projectile hits player.
+                if float(np.linalg.norm(self.player_pos - proj.pos)) <= proj.radius:
+                    self.player_hp -= proj.damage
+                    self._damage_taken_step += proj.damage
+                    continue
 
             alive.append(proj)
 
         self.projectiles = alive
-        return float(damage_taken)
 
-    def _compute_reward(self, terminated: bool, truncated: bool) -> float:
+    def compute_reward(self, terminated: bool, truncated: bool) -> float:
         reward = self.cfg.r_time
         reward += self.cfg.r_damage_dealt * self._damage_dealt_step
         reward += self.cfg.r_damage_taken * self._damage_taken_step
@@ -383,37 +307,56 @@ class BossArenaEnv(gym.Env):
         )
 
     def _norm_vel(self, v: np.ndarray) -> np.ndarray:
-        vmax = max(self.cfg.dash_speed, self.cfg.fan_speed, self.cfg.ring_speed, 1e-6)
+        vmax = max(
+            self.cfg.player_speed,
+            self.cfg.boss_speed,
+            self.cfg.player_projectile_speed,
+            self.cfg.boss_projectile_speed,
+            1e-6,
+        )
         return np.array(np.clip(v / vmax, -1.0, 1.0), dtype=np.float32)
 
-    def _get_obs(self) -> np.ndarray:
+    def get_obs(self) -> np.ndarray:
         diag = float(np.sqrt(self.cfg.width ** 2 + self.cfg.height ** 2))
         delta = self.boss_pos - self.player_pos
         dist = float(np.linalg.norm(delta))
+        max_proj_dmg = float(max(self.cfg.player_projectile_damage, self.cfg.boss_projectile_damage, 1.0))
+        max_proj_radius = float(max(self.cfg.player_projectile_radius, self.cfg.boss_projectile_radius, 1e-6))
 
         player_block = [
             *self._norm_pos(self.player_pos),
             *self._norm_vel(self.player_vel),
             self._scale01_to_m11(self.player_hp / max(1e-6, self.cfg.player_hp)),
-            self._scale01_to_m11(self.player_dash_cd / max(1, self.cfg.dash_cd)),
-            self._scale01_to_m11(self.player_melee_cd / max(1, self.cfg.melee_cd)),
-            self._scale01_to_m11(float(np.linalg.norm(self.player_vel)) / max(1e-6, self.cfg.dash_speed)),
+            self._scale01_to_m11(self.player_shoot_cd / max(1, self.cfg.player_shoot_cd)),
+            self._scale01_to_m11(float(np.linalg.norm(self.player_vel)) / max(1e-6, self.cfg.player_speed)),
+            1.0 if self.player_shoot_cd == 0 else -1.0,
         ]
 
-        phase_norm = (self.boss_phase - 1) / 2.0
         boss_block = [
             *self._norm_pos(self.boss_pos),
             *self._norm_vel(self.boss_vel),
             self._scale01_to_m11(self.boss_hp / max(1e-6, self.cfg.boss_hp)),
-            self._scale01_to_m11(phase_norm),
+            self._scale01_to_m11(self.boss_shoot_cd / max(1, self.cfg.boss_shoot_cd)),
             self._scale01_to_m11(dist / max(1e-6, diag)),
         ]
 
         relative_block = [
             float(np.clip(delta[0] / self.cfg.width, -1.0, 1.0)),
             float(np.clip(delta[1] / self.cfg.height, -1.0, 1.0)),
-            float(np.clip((self.boss_vel[0] - self.player_vel[0]) / max(1e-6, self.cfg.dash_speed), -1.0, 1.0)),
-            float(np.clip((self.boss_vel[1] - self.player_vel[1]) / max(1e-6, self.cfg.dash_speed), -1.0, 1.0)),
+            float(
+                np.clip(
+                    (self.boss_vel[0] - self.player_vel[0]) / max(1e-6, self.cfg.player_projectile_speed),
+                    -1.0,
+                    1.0,
+                )
+            ),
+            float(
+                np.clip(
+                    (self.boss_vel[1] - self.player_vel[1]) / max(1e-6, self.cfg.player_projectile_speed),
+                    -1.0,
+                    1.0,
+                )
+            ),
         ]
 
         global_block = [
@@ -429,7 +372,7 @@ class BossArenaEnv(gym.Env):
             key=lambda p: float(np.linalg.norm(p.pos - self.player_pos)),
         )
 
-        max_life = float(max(self.cfg.fan_life, self.cfg.ring_life, 1))
+        vel_norm_ref = max(self.cfg.player_projectile_speed, self.cfg.boss_projectile_speed, 1e-6)
         for i in range(self.cfg.k_projectiles):
             if i < len(sorted_projectiles):
                 p = sorted_projectiles[i]
@@ -438,16 +381,16 @@ class BossArenaEnv(gym.Env):
                     [
                         float(np.clip(rel[0] / self.cfg.width, -1.0, 1.0)),
                         float(np.clip(rel[1] / self.cfg.height, -1.0, 1.0)),
-                        float(np.clip(p.vel[0] / max(1e-6, self.cfg.dash_speed), -1.0, 1.0)),
-                        float(np.clip(p.vel[1] / max(1e-6, self.cfg.dash_speed), -1.0, 1.0)),
-                        self._scale01_to_m11(p.life / max_life),
-                        self._scale01_to_m11(min(1.0, p.radius / 1.0)),
-                        self._scale01_to_m11(min(1.0, p.damage / 15.0)),
+                        float(np.clip(p.vel[0] / vel_norm_ref, -1.0, 1.0)),
+                        float(np.clip(p.vel[1] / vel_norm_ref, -1.0, 1.0)),
+                        self._scale01_to_m11(p.radius / max_proj_radius),
+                        self._scale01_to_m11(p.damage / max_proj_dmg),
+                        float(np.clip(p.owner, -1.0, 1.0)),
                         1.0,  # presence mask
                     ]
                 )
             else:
-                obs.extend([0.0, 0.0, 0.0, 0.0, -1.0, -1.0, -1.0, -1.0])
+                obs.extend([0.0, 0.0, 0.0, 0.0, -1.0, -1.0, 0.0, -1.0])
 
         out = np.array(obs, dtype=np.float32)
         if out.shape[0] != self.cfg.obs_dim:
@@ -476,7 +419,8 @@ class BossArenaEnv(gym.Env):
         for p in self.projectiles:
             px, py = self._world_to_screen(p.pos)
             pr = max(2, int((p.radius / self.cfg.width) * self.cfg.render_width))
-            pygame.draw.circle(surface, (255, 195, 75), (px, py), pr)
+            color = (120, 255, 120) if p.owner == 1 else (255, 195, 75)
+            pygame.draw.circle(surface, color, (px, py), pr)
 
         hp_h = 14
         pad = 12
@@ -507,9 +451,8 @@ class BossArenaEnv(gym.Env):
                 self._screen = pygame.display.set_mode((self.cfg.render_width, self.cfg.render_height))
                 pygame.display.set_caption("Boss Arena Preview")
                 self._clock = pygame.time.Clock()
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    pass
+            for _event in pygame.event.get():
+                pass
             self._draw_scene(self._screen)
             pygame.display.flip()
             self._clock.tick(self.cfg.render_fps)
@@ -523,9 +466,8 @@ class BossArenaEnv(gym.Env):
         return frame
 
     def close(self):
-        if pygame is not None:
-            if self._screen is not None or self._surface is not None:
-                pygame.quit()
+        if pygame is not None and (self._screen is not None or self._surface is not None):
+            pygame.quit()
         self._screen = None
         self._surface = None
         self._clock = None
