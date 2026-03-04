@@ -5,3 +5,5 @@ __pycache__/
 # Training outputs
 checkpoints/
 logs/
+
+.claude/
