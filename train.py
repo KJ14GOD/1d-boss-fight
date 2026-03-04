@@ -34,13 +34,12 @@ class LatestCheckpointCallback(BaseCallback):
         return True
 
 
-def build_level0_config(spawn_jitter: float = 0.0, min_spawn_distance: float = 6.0) -> GameConfig:
+def build_level0_config(min_spawn_distance: float = 6.0) -> GameConfig:
     # Easiest curriculum level.
     cfg = GameConfig()
     cfg.boss_speed = 0.18
     cfg.boss_shoot_cd = 20
     cfg.player_shoot_cd = 9
-    cfg.spawn_jitter = max(0.0, float(spawn_jitter))
     cfg.min_spawn_distance = max(0.0, float(min_spawn_distance))
     return cfg
 
@@ -83,18 +82,6 @@ def parse_args():
     parser.add_argument("--num-envs", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="auto", help="auto, cpu, cuda, mps")
-    parser.add_argument(
-        "--train-spawn-jitter",
-        type=float,
-        default=0.0,
-        help="Random start jitter radius (world units) used during training resets.",
-    )
-    parser.add_argument(
-        "--eval-spawn-jitter",
-        type=float,
-        default=0.0,
-        help="Random start jitter radius (world units) used during eval callback resets.",
-    )
     parser.add_argument(
         "--min-spawn-distance",
         type=float,
@@ -157,11 +144,9 @@ def main():
     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     train_cfg = build_level0_config(
-        spawn_jitter=args.train_spawn_jitter,
         min_spawn_distance=args.min_spawn_distance,
     )
     eval_cfg = build_level0_config(
-        spawn_jitter=args.eval_spawn_jitter,
         min_spawn_distance=args.min_spawn_distance,
     )
     train_env = create_train_env(
@@ -234,8 +219,6 @@ def main():
         "device": args.device,
         "normalize": args.normalize,
         "learning_rate": args.learning_rate,
-        "train_spawn_jitter": args.train_spawn_jitter,
-        "eval_spawn_jitter": args.eval_spawn_jitter,
         "min_spawn_distance": args.min_spawn_distance,
         "n_steps": args.n_steps,
         "batch_size": args.batch_size,

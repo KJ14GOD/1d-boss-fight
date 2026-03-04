@@ -10,12 +10,11 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor, VecNormali
 from game import BossArenaEnv, GameConfig
 
 
-def build_level0_config(spawn_jitter: float = 0.0) -> GameConfig:
+def build_level0_config() -> GameConfig:
     cfg = GameConfig()
     cfg.boss_speed = 0.18
     cfg.boss_shoot_cd = 20
     cfg.player_shoot_cd = 9
-    cfg.spawn_jitter = max(0.0, float(spawn_jitter))
     return cfg
 
 
@@ -51,7 +50,6 @@ def parse_args():
     parser.add_argument("--vecnormalize-path", type=str, default=None)
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--seed", type=int, default=12345)
-    parser.add_argument("--spawn-jitter", type=float, default=0.0, help="Random start jitter radius in world units.")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--stochastic", action="store_true", help="Use stochastic actions instead of deterministic.")
     return parser.parse_args()
@@ -63,7 +61,7 @@ def main():
     if not model_path.exists():
         raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
 
-    cfg = build_level0_config(spawn_jitter=args.spawn_jitter)
+    cfg = build_level0_config()
     base_seed = args.seed
 
     def _make_env():
@@ -141,7 +139,6 @@ def main():
     print(f"Model: {model_path}")
     print(f"Episodes: {args.episodes}")
     print(f"Deterministic policy: {deterministic}")
-    print(f"Spawn jitter: {cfg.spawn_jitter:.3f}")
     print(f"Win rate: {win_rate:.2f}%")
     print(f"Avg episode length (steps): {avg_len:.2f}")
     print(f"Avg episode reward: {avg_reward:.3f}")

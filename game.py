@@ -15,7 +15,6 @@ class GameConfig:
     width: float = 20.0
     height: float = 20.0
     max_steps: int = 10000
-    spawn_jitter: float = 0.0
     min_spawn_distance: float = 6.0
 
     #player
@@ -124,27 +123,23 @@ class BossArenaEnv(gym.Env):
         super().reset(seed=seed)
         self._init_state()
 
-        base_player = np.array([self.cfg.width * 0.25, self.cfg.height * 0.5], dtype=np.float32)
-        base_boss = np.array([self.cfg.width * 0.75, self.cfg.height * 0.5], dtype=np.float32)
-        self.player_pos[:] = base_player
-        self.boss_pos[:] = base_boss
 
-        jitter = float(max(0.0, self.cfg.spawn_jitter))
-        if jitter > 0.0:
-            for _ in range(24):
-                p = base_player + self.np_random.uniform(-jitter, jitter, size=2).astype(np.float32) # add randomness to player pos
-                b = base_boss + self.np_random.uniform(-jitter, jitter, size=2).astype(np.float32) # add randomness to boss pos
-                p[0] = float(np.clip(p[0], 0.0, self.cfg.width))  # clip to arena width
-                p[1] = float(np.clip(p[1], 0.0, self.cfg.height))  # clip to arena height
-                b[0] = float(np.clip(b[0], 0.0, self.cfg.width))  # clip to arena width
-                b[1] = float(np.clip(b[1], 0.0, self.cfg.height))  # clip to arena height
-                if float(np.linalg.norm(b - p)) >= self.cfg.min_spawn_distance:
-                    self.player_pos[:] = p
-                    self.boss_pos[:] = b
-                    break
+        while True:
+            p = np.array([self.np_random.uniform(0.0, self.cfg.width),
+                        self.np_random.uniform(0.0, self.cfg.height)], dtype=np.float32)
+            b = np.array([self.np_random.uniform(0.0, self.cfg.width),
+                        self.np_random.uniform(0.0, self.cfg.height)], dtype=np.float32)
+            if float(np.linalg.norm(b - p)) >= self.cfg.min_spawn_distance:
+                break
+
+        self.player_pos[:] = p
+        self.boss_pos[:] = b
 
         obs = self.get_obs()
-        info = {"projectiles": 0}
+        info = {
+            "player_pos": self.player_pos,
+            "boss_pos": self.boss_pos,
+            "projectiles": 0}
         return obs, info
 
     def step(self, action):
@@ -340,6 +335,7 @@ class BossArenaEnv(gym.Env):
         )
         return np.array(np.clip(v / vmax, -1.0, 1.0), dtype=np.float32)
 
+    # 53 dimension vector 
     def get_obs(self) -> np.ndarray:
         diag = float(np.sqrt(self.cfg.width ** 2 + self.cfg.height ** 2))
         delta = self.boss_pos - self.player_pos
@@ -365,7 +361,7 @@ class BossArenaEnv(gym.Env):
         ]
 
         relative_block = [
-            float(np.clip(delta[0] / self.cfg.width, -1.0, 1.0)),
+            float(np.clip(delta[0] / self.cfg.width, -1.0, 1.0)), # normalize distance
             float(np.clip(delta[1] / self.cfg.height, -1.0, 1.0)),
             float(
                 np.clip(
@@ -384,8 +380,8 @@ class BossArenaEnv(gym.Env):
         ]
 
         global_block = [
-            self._scale01_to_m11(self.step_count / max(1, self.cfg.max_steps)),
-            self._scale01_to_m11(min(1.0, len(self.projectiles) / 25.0)),
+            self._scale01_to_m11(self.step_count / max(1, self.cfg.max_steps)), # normalize step count
+            self._scale01_to_m11(min(1.0, len(self.projectiles) / 25.0)), # normalize number of projectiles
         ]
 
         obs = list(player_block) + list(boss_block) + list(relative_block) + list(global_block)
