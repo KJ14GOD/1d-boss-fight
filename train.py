@@ -5,9 +5,9 @@ import importlib.util
 import json
 from pathlib import Path
 
-from game import BossArenaEnv, GameConfig, make_env
+from game import BossArenaEnv, GameConfig, make_env, apply_level
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMonitor, VecNormalize
 
 
@@ -34,15 +34,91 @@ class LatestCheckpointCallback(BaseCallback):
         return True
 
 
-def build_level0_config(min_spawn_distance: float = 6.0) -> GameConfig:
-    # Easiest curriculum level.
-    cfg = GameConfig()
-    cfg.boss_speed = 0.18
-    cfg.boss_shoot_cd = 20
-    cfg.player_shoot_cd = 9
-    cfg.min_spawn_distance = max(0.0, float(min_spawn_distance))
-    return cfg
+class CurriculumCallback(BaseCallback):
+    """Every eval_freq steps, check win rate. If >= threshold, promote to next level."""
 
+    def __init__(
+        self,
+        eval_freq: int,
+        eval_episodes: int,
+        win_rate_threshold: float,
+        num_envs: int,
+        seed: int,
+        min_spawn_distance: float,
+        normalize: bool,
+        start_method: str,
+        checkpoint_dir: Path,
+        verbose: int = 1,
+    ):
+        super().__init__(verbose=verbose)
+        self.eval_freq = max(1, eval_freq)
+        self.eval_episodes = eval_episodes
+        self.win_rate_threshold = win_rate_threshold
+        self.num_envs = num_envs
+        self.seed = seed
+        self.min_spawn_distance = min_spawn_distance
+        self.normalize = normalize
+        self.start_method = start_method
+        self.checkpoint_dir = Path(checkpoint_dir)
+        self.current_level = 0
+        self.max_level = 2
+        self.best_mean_reward = -float("inf")
+        self.promoted = False
+        self._eval_env = None
+
+    def _init_eval_env(self):
+        if self._eval_env is not None:
+            self._eval_env.close()
+        cfg = build_config(self.current_level, self.min_spawn_distance)
+        self._eval_env = create_eval_env(
+            seed=self.seed + 10_000, cfg=cfg, normalize=self.normalize,
+        )
+
+    def _on_training_start(self):
+        self._init_eval_env()
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.eval_freq != 0:
+            return True
+
+        sync_eval_vecnormalize(self.model.get_env(), self._eval_env)
+        win_rate, mean_reward, mean_ep_len = evaluate(self.model, self._eval_env, self.eval_episodes)
+
+        print(f"\n  [Curriculum] Level {self.current_level} | Win rate: {win_rate:.0%} | "
+              f"Mean reward: {mean_reward:.2f} | Mean ep length: {mean_ep_len:.0f}")
+
+        if mean_reward > self.best_mean_reward:
+            self.best_mean_reward = mean_reward
+            self.model.save(str(self.checkpoint_dir / "best_model.zip"))
+            print(f"  [Curriculum] New best reward: {mean_reward:.2f} — saved best_model.zip")
+
+        if win_rate >= self.win_rate_threshold and self.current_level < self.max_level:
+            save_path = self.checkpoint_dir / f"level{self.current_level}_pass.zip"
+            self.model.save(str(save_path))
+            print(f"  [Curriculum] Level {self.current_level} PASSED! Saved {save_path}")
+
+            self.current_level += 1
+            self.promoted = True
+            print(f"  [Curriculum] Promoting to level {self.current_level} — stopping to swap envs...")
+            return False  # stop model.learn() so main() can swap envs safely
+
+        elif win_rate >= self.win_rate_threshold and self.current_level >= self.max_level:
+            save_path = self.checkpoint_dir / f"level{self.current_level}_pass.zip"
+            self.model.save(str(save_path))
+            print(f"  [Curriculum] ALL LEVELS COMPLETE! Saved {save_path}")
+
+        return True
+
+    def _on_training_end(self):
+        if self._eval_env is not None:
+            self._eval_env.close()
+
+
+def build_config(level_id: int, min_spawn_distance: float = 6.0) -> GameConfig:
+    cfg = GameConfig()
+    cfg.min_spawn_distance = max(0.0, float(min_spawn_distance))
+    apply_level(cfg, level_id)
+    return cfg
 
 def create_train_env(
     num_envs: int,
@@ -126,6 +202,8 @@ def parse_args():
         choices=["spawn", "fork", "forkserver"],
         help="SubprocVecEnv start method. Use spawn on macOS for stability.",
     )
+    parser.add_argument("--win-rate-threshold", type=float, default=0.70,
+                        help="Win rate to promote to next curriculum level.")
     return parser.parse_args()
 
 
@@ -138,17 +216,39 @@ def sync_eval_vecnormalize(train_env, eval_env):
     eval_vecnorm.ret_rms = train_vecnorm.ret_rms
 
 
+def evaluate(model, eval_env, n_episodes: int = 50) -> tuple:
+    """Returns (win_rate, mean_reward, mean_ep_length)."""
+    wins = 0
+    total_rewards = []
+    total_lengths = []
+    for _ in range(n_episodes):
+        obs = eval_env.reset()
+        done = False
+        ep_reward = 0.0
+        ep_length = 0
+        while not done:
+            action, _ = model.predict(obs, deterministic=True)
+            obs, rewards, dones, infos = eval_env.step(action)
+            ep_reward += rewards[0]
+            ep_length += 1
+            if dones[0]:
+                done = True
+                if infos[0].get("win", False):
+                    wins += 1
+        total_rewards.append(ep_reward)
+        total_lengths.append(ep_length)
+    win_rate = wins / n_episodes
+    mean_reward = sum(total_rewards) / n_episodes
+    mean_ep_length = sum(total_lengths) / n_episodes
+    return win_rate, mean_reward, mean_ep_length
+
+
 def main():
     args = parse_args()
     args.log_dir.mkdir(parents=True, exist_ok=True)
     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    train_cfg = build_level0_config(
-        min_spawn_distance=args.min_spawn_distance,
-    )
-    eval_cfg = build_level0_config(
-        min_spawn_distance=args.min_spawn_distance,
-    )
+    train_cfg = build_config(level_id=0, min_spawn_distance=args.min_spawn_distance)
     train_env = create_train_env(
         num_envs=args.num_envs,
         seed=args.seed,
@@ -156,12 +256,6 @@ def main():
         normalize=args.normalize,
         start_method=args.start_method,
     )
-    eval_env = create_eval_env(
-        seed=args.seed + 10_000,
-        cfg=eval_cfg,
-        normalize=args.normalize,
-    )
-    sync_eval_vecnormalize(train_env, eval_env)
 
     has_tensorboard = importlib.util.find_spec("tensorboard") is not None
     tensorboard_log = str(args.log_dir / "tb") if has_tensorboard else None
@@ -184,14 +278,16 @@ def main():
         save_path=args.checkpoint_dir,
         name_prefix="latest",
     )
-    eval_cb = EvalCallback(
-        eval_env=eval_env,
-        best_model_save_path=str(args.checkpoint_dir),
-        log_path=str(args.log_dir / "eval"),
+    curriculum_cb = CurriculumCallback(
         eval_freq=eval_freq,
-        n_eval_episodes=args.eval_episodes,
-        deterministic=True,
-        render=False,
+        eval_episodes=args.eval_episodes,
+        win_rate_threshold=args.win_rate_threshold,
+        num_envs=args.num_envs,
+        seed=args.seed,
+        min_spawn_distance=args.min_spawn_distance,
+        normalize=args.normalize,
+        start_method=args.start_method,
+        checkpoint_dir=args.checkpoint_dir,
     )
 
     model = PPO(
@@ -236,10 +332,28 @@ def main():
     (args.log_dir / "run_config.json").write_text(json.dumps(run_config, indent=2), encoding="utf-8")
 
     try:
-        model.learn(
-            total_timesteps=args.total_timesteps,
-            callback=[periodic_cb, latest_cb, eval_cb],
-        )
+        while True:
+            model.learn(
+                total_timesteps=args.total_timesteps,
+                callback=[periodic_cb, latest_cb, curriculum_cb],
+                reset_num_timesteps=False,
+            )
+
+            if not curriculum_cb.promoted:
+                break  # training finished normally (hit total_timesteps or all levels done)
+
+            # swap envs for the new level
+            curriculum_cb.promoted = False
+            train_env.close()
+
+            cfg = build_config(curriculum_cb.current_level, args.min_spawn_distance)
+            train_env = create_train_env(
+                num_envs=args.num_envs, seed=args.seed, cfg=cfg,
+                normalize=args.normalize, start_method=args.start_method,
+            )
+            model.set_env(train_env)
+            curriculum_cb._init_eval_env()
+
     finally:
         model.save(str(args.checkpoint_dir / "latest_final.zip"))
         vecnorm = model.get_vec_normalize_env()
@@ -247,7 +361,6 @@ def main():
             vecnorm.save(str(args.checkpoint_dir / "latest_final_vecnormalize.pkl"))
 
         train_env.close()
-        eval_env.close()
 
 
 if __name__ == "__main__":

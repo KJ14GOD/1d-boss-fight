@@ -7,15 +7,7 @@ import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor, VecNormalize
 
-from game import BossArenaEnv, GameConfig
-
-
-def build_level0_config() -> GameConfig:
-    cfg = GameConfig()
-    cfg.boss_speed = 0.18
-    cfg.boss_shoot_cd = 20
-    cfg.player_shoot_cd = 9
-    return cfg
+from game import BossArenaEnv, GameConfig, apply_level
 
 
 def find_vecnormalize_path(model_path: Path, explicit: str | None) -> Path | None:
@@ -60,6 +52,7 @@ def parse_args():
     )
     parser.add_argument("--video-fps", type=int, default=60)
     parser.add_argument("--max-frames", type=int, default=0, help="0 means no cap.")
+    parser.add_argument("--level", type=int, default=0, choices=[0, 1, 2], help="Boss difficulty level.")
     return parser.parse_args()
 
 
@@ -87,7 +80,8 @@ def main():
         raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
 
     render_mode = "rgb_array" if args.video_path is not None else "human"
-    cfg = build_level0_config()
+    cfg = GameConfig()
+    apply_level(cfg, args.level)
     base_seed = args.seed
 
     def _make_env():

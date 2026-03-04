@@ -16,6 +16,7 @@ class GameConfig:
     height: float = 20.0
     max_steps: int = 10000
     min_spawn_distance: float = 6.0
+    level_id: int = 0
 
     #player
     player_hp: float = 100.0
@@ -51,6 +52,29 @@ class GameConfig:
     render_width: int = 960
     render_height: int = 576
     render_fps: int = 60
+
+
+def apply_level(cfg: GameConfig, level_id: int) -> GameConfig:
+    cfg.level_id = int(level_id)
+    if level_id == 0:
+        cfg.boss_speed = 0.20
+        cfg.boss_shoot_cd = 8
+        cfg.boss_projectile_speed = 0.78
+    
+    elif level_id == 1:
+        cfg.boss_speed = 0.25
+        cfg.boss_shoot_cd = 6
+        cfg.boss_projectile_speed = 0.83
+    
+    elif level_id == 2:
+        cfg.boss_speed = 0.30
+        cfg.boss_shoot_cd = 4
+        cfg.boss_projectile_speed = 0.88
+    
+    else:
+        raise ValueError(f"Invalid level id: {level_id}")
+    
+    return cfg
 
 
 @dataclass
@@ -137,9 +161,11 @@ class BossArenaEnv(gym.Env):
 
         obs = self.get_obs()
         info = {
-            "player_pos": self.player_pos,
-            "boss_pos": self.boss_pos,
-            "projectiles": 0}
+            "level_id": int(self.cfg.level_id),
+            "player_pos": (float(self.player_pos[0]), float(self.player_pos[1])),
+            "boss_pos": (float(self.boss_pos[0]), float(self.boss_pos[1])),
+            "projectiles": 0,
+        }
         return obs, info
 
     def step(self, action):
@@ -162,6 +188,7 @@ class BossArenaEnv(gym.Env):
         obs = self.get_obs()
         info = {
             "win": self.boss_hp <= 0.0 and self.player_hp > 0.0,
+            "level_id": int(self.cfg.level_id),
             "boss_hp": float(self.boss_hp),
             "player_hp": float(self.player_hp),
             "damage_dealt_step": float(self._damage_dealt_step),
