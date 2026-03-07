@@ -286,6 +286,11 @@ class BossArenaEnv(gym.Env):
             )
         )
 
+    def action_masks(self):
+        move_mask = [True] * 9
+        shoot_mask = [True, True] if self.player_shoot_cd == 0 else [True, False]
+        return move_mask + shoot_mask
+
     def _projectile_hits_target(self, proj: Projectile) -> bool:
         if proj.owner == 1:
             return float(np.linalg.norm(self.boss_pos - proj.pos)) <= (proj.radius + self.cfg.boss_radius)

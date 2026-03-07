@@ -4,7 +4,8 @@ import argparse
 from pathlib import Path
 
 import numpy as np
-from stable_baselines3 import PPO
+from sb3_contrib import MaskablePPO
+from sb3_contrib.common.maskable.utils import get_action_masks
 from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor, VecNormalize
 
 from game import BossArenaEnv, GameConfig, apply_level
@@ -103,7 +104,7 @@ def main():
         env = raw_env
         print("No VecNormalize stats found; rendering without normalization wrapper.")
 
-    model = PPO.load(str(model_path), env=env, device=args.device)
+    model = MaskablePPO.load(str(model_path), env=env, device=args.device)
     deterministic = not args.stochastic
     print(f"Render mode: {render_mode} | deterministic_policy={deterministic}")
 
@@ -119,7 +120,8 @@ def main():
         last_info = {}
 
         while not done:
-            action, _ = model.predict(obs, deterministic=deterministic)
+            action_masks = get_action_masks(env)
+            action, _ = model.predict(obs, deterministic=deterministic, action_masks=action_masks)
             obs, rewards, dones, infos = env.step(action)
             done = bool(dones[0])
             last_info = infos[0]

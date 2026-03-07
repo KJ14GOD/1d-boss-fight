@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 
 from game import BossArenaEnv, GameConfig, make_env, apply_level
-from stable_baselines3 import PPO
+from sb3_contrib import MaskablePPO
+from sb3_contrib.common.maskable.utils import get_action_masks
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMonitor, VecNormalize
 
@@ -227,7 +228,8 @@ def evaluate(model, eval_env, n_episodes: int = 50) -> tuple:
         ep_reward = 0.0
         ep_length = 0
         while not done:
-            action, _ = model.predict(obs, deterministic=True)
+            action_masks = get_action_masks(eval_env)
+            action, _ = model.predict(obs, deterministic=True, action_masks=action_masks)
             obs, rewards, dones, infos = eval_env.step(action)
             ep_reward += rewards[0]
             ep_length += 1
@@ -290,7 +292,7 @@ def main():
         checkpoint_dir=args.checkpoint_dir,
     )
 
-    model = PPO(
+    model = MaskablePPO(
         policy="MlpPolicy",
         env=train_env,
         verbose=1,
@@ -333,8 +335,11 @@ def main():
 
     try:
         while True:
+            remaining = max(0, args.total_timesteps - model.num_timesteps)
+            if remaining == 0:
+                break
             model.learn(
-                total_timesteps=args.total_timesteps,
+                total_timesteps=remaining,
                 callback=[periodic_cb, latest_cb, curriculum_cb],
                 reset_num_timesteps=False,
             )
